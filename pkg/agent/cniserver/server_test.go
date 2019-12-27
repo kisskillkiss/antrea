@@ -331,7 +331,7 @@ func TestValidateOVSPort(t *testing.T) {
 	containerConfig.OVSPortConfig = &interfacestore.OVSPortConfig{PortUUID: portUUID}
 
 	ifaceStore.AddInterface(containerConfig)
-	err := podConfigurator.validateOVSPort(hostIfaceName, containerMACStr, containerID, result.IPs)
+	err := podConfigurator.validateOVSInterfaceConfig(hostIfaceName, containerMACStr, containerID, testPodName, testPodNamespace, result.IPs)
 	assert.Nil(t, err, "Failed to validate OVS port configuration")
 }
 

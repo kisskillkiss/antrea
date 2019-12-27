@@ -465,13 +465,13 @@ func (pc *podConfigurator) removeInterfaces(podName, podNamespace, containerID, 
 		return err
 	}
 	// Remove container configuration from cache.
-	pc.ifaceStore.DeleteInterface(ovsPortName)
+	pc.ifaceStore.DeleteInterface(containerConfig)
 	klog.Infof("Interfaces removed successfully for container %s", containerID)
 	return nil
 }
 
 func (pc *podConfigurator) checkInterfaces(
-	containerID, containerNetNS, hostVethName string,
+	containerID, containerNetNS, podName, podNamespace string,
 	containerIface, hostIface *current.Interface,
 	prevResult *current.Result) error {
 	netns, err := ns.GetNS(containerNetNS)
@@ -480,16 +480,19 @@ func (pc *podConfigurator) checkInterfaces(
 		return err
 	}
 	defer netns.Close()
+
 	if containerlink, err := pc.checkContainerInterface(
 		containerNetNS,
 		containerID,
 		netns,
 		containerIface,
-		prevResult); err != nil {
+		prevResult.IPs,
+		prevResult.Routes); err != nil {
 		return err
 	} else if err := pc.checkHostInterface(
 		containerID,
-		hostVethName,
+		podName,
+		podNamespace,
 		hostIface,
 		containerIface,
 		containerlink,
@@ -503,7 +506,8 @@ func (pc *podConfigurator) checkContainerInterface(
 	containerNetns, containerID string,
 	netns ns.NetNS,
 	containerIface *current.Interface,
-	prevResult *current.Result) (*vethPair, error) {
+	containerIPs []*current.IPConfig,
+	containerRoutes []*cnitypes.Route) (*vethPair, error) {
 	var contlink *vethPair
 	// Check netns configuration
 	if containerNetns != containerIface.Sandbox {
@@ -521,11 +525,11 @@ func (pc *podConfigurator) checkContainerInterface(
 			return errlink
 		}
 		// Check container IP config
-		if err := ip.ValidateExpectedInterfaceIPs(containerIface.Name, prevResult.IPs); err != nil {
+		if err := ip.ValidateExpectedInterfaceIPs(containerIface.Name, containerIPs); err != nil {
 			return err
 		}
 		// Check container route config
-		if err := ip.ValidateExpectedRoute(prevResult.Routes); err != nil {
+		if err := ip.ValidateExpectedRoute(containerRoutes); err != nil {
 			return err
 		}
 		return nil
@@ -538,17 +542,22 @@ func (pc *podConfigurator) checkContainerInterface(
 }
 
 func (pc *podConfigurator) checkHostInterface(
-	containerID, vethName string,
+	containerID, podName, podNamespace string,
 	hostIntf, containerIntf *current.Interface,
 	containerLink *vethPair,
 	containerIPs []*current.IPConfig) error {
 	hostVeth, errlink := validateContainerPeerInterface(hostIntf, containerLink)
 	if errlink != nil {
-		klog.Errorf("Failed to check container interface %s peer %s in the host: %v",
-			containerID, vethName, errlink)
+		klog.Errorf("Failed to check container %s interface on the host: %v",
+			containerID, errlink)
 		return errlink
 	}
-	if err := pc.validateOVSPort(hostVeth.name, containerIntf.Mac, containerID, containerIPs); err != nil {
+	if err := pc.validateOVSInterfaceConfig(hostVeth.name,
+		containerIntf.Mac,
+		containerID,
+		podName,
+		podNamespace,
+		containerIPs); err != nil {
 		klog.Errorf("Failed to check host link %s for container %s attaching status on ovs. err: %v",
 			hostVeth.name, containerID, err)
 		return err
@@ -556,13 +565,13 @@ func (pc *podConfigurator) checkHostInterface(
 	return nil
 }
 
-func (pc *podConfigurator) validateOVSPort(
-	ovsPortName, containerMAC, containerID string,
+func (pc *podConfigurator) validateOVSInterfaceConfig(
+	interfaceName, containerMAC, containerID, podName, podNamespace string,
 	ips []*current.IPConfig) error {
-	if containerConfig, found := pc.ifaceStore.GetInterface(ovsPortName); found {
+	if containerConfig, found := pc.ifaceStore.GetContainerInterface(podName, podNamespace); found {
 		if containerConfig.MAC.String() != containerMAC {
 			return fmt.Errorf("failed to check container MAC %s on OVS port %s",
-				containerID, ovsPortName)
+				containerID, interfaceName)
 		}
 
 		for _, ipc := range ips {
@@ -572,10 +581,9 @@ func (pc *podConfigurator) validateOVSPort(
 				}
 			}
 		}
-		return fmt.Errorf("failed to find a valid IP equal to attached address")
+		return fmt.Errorf("interface IP address %s does not match", containerConfig.IP.String())
 	} else {
-		klog.V(2).Infof("Not found container %s config from local cache", containerID)
-		return fmt.Errorf("not found OVS port %s", ovsPortName)
+		return fmt.Errorf("container %s interface %s not found from local cache", containerID, interfaceName)
 	}
 }
 
@@ -601,7 +609,7 @@ func (pc *podConfigurator) reconcile(pods []corev1.Pod) error {
 	// current list of Pods.
 	desiredInterfaces := make(map[string]bool)
 	// knownInterfaces is the list of interfaces currently in the local cache.
-	knownInterfaces := pc.ifaceStore.GetInterfaceIDs()
+	knownInterfaces := pc.ifaceStore.GetInterfaceKeys()
 
 	for _, pod := range pods {
 		// Skip Pods for which we are not in charge of the networking.
@@ -637,7 +645,7 @@ func (pc *podConfigurator) reconcile(pods []corev1.Pod) error {
 			klog.Errorf("Error when re-installing flows for Pod %s/%s", pod.Namespace, pod.Name)
 			continue
 		}
-		desiredInterfaces[containerConfig.InterfaceName] = true
+		desiredInterfaces[util.GenerateContainerInterfaceKey(pod.Name, pod.Namespace)] = true
 	}
 
 	for _, ifaceID := range knownInterfaces {

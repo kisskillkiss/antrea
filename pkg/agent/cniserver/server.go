@@ -315,12 +315,14 @@ func (s *CNIServer) hostNetNsPath(netNS string) string {
 }
 
 func (s *CNIServer) validatePrevResult(cfgArgs *cnipb.CniCmdArgs, k8sCNIArgs *k8sArgs, prevResult *current.Result) (*cnipb.CniCmdResponse, error) {
-	var containerIntf, hostIntf *current.Interface
-	hostVethName := util.GenerateContainerInterfaceName(string(k8sCNIArgs.K8S_POD_NAME), string(k8sCNIArgs.K8S_POD_NAMESPACE))
 	containerID := cfgArgs.ContainerId
 	netNS := s.hostNetNsPath(cfgArgs.Netns)
+	podName := string(k8sCNIArgs.K8S_POD_NAME)
+	podNamespace := string(k8sCNIArgs.K8S_POD_NAMESPACE)
+	hostVethName := util.GenerateContainerInterfaceName(podName, podNamespace)
 
 	// Find interfaces from previous configuration
+	var containerIntf, hostIntf *current.Interface
 	for _, intf := range prevResult.Interfaces {
 		switch intf.Name {
 		case cfgArgs.Ifname:
@@ -343,7 +345,8 @@ func (s *CNIServer) validatePrevResult(cfgArgs *cnipb.CniCmdArgs, k8sCNIArgs *k8
 	if err := s.podConfigurator.checkInterfaces(
 		containerID,
 		netNS,
-		hostVethName,
+		podName,
+		podNamespace,
 		containerIntf,
 		hostIntf,
 		prevResult); err != nil {
